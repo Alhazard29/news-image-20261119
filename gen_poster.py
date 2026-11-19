@@ -1,285 +1,259 @@
 #!/usr/bin/env python3
-"""Render the 19 November 2026 world-news poster (entry.png).
+"""Deterministic newspaper poster for 19 November 2026.
 
-Build-time generator only: it runs on the author's machine to produce the
-image the entry ships. The entry itself (main.py) only copies entry.png
-to the output directory, so nothing here runs at grade time.
-Deterministic: fixed text, fixed fonts, no clock, no randomness, no network.
-
-Facts used (all verified 19 Nov 2026, see the research note):
-- Trump, Xi and Putin meet today in Shenzhen in the first-ever trilateral
-  of the three leaders; nuclear arms top the agenda, but officials caution
-  against expecting a deal. No outcome is claimed — the meeting happens
-  later today, so the poster states the schedule, not a result.
-- Iran fired on US drone and missile sites in Kuwait overnight (Reuters);
-  Bahrain has intercepted Iranian attacks three times in a week; Vance
-  says no "forever war" but gives no end date.
-- The ICJ reads its Myanmar Rohingya genocide judgment today in The Hague;
-  the outcome is not yet known, so the poster states only what is at stake.
-- Prabowo attends the APEC leaders' meeting today; $71.8B of
-  Indonesia-China deals were set out on 18 Nov.
-- GTA VI rolls out worldwide from midnight local time, New Zealand first.
-- Hakeem Jeffries was nominated 251-11 on 18 Nov, poised to be the first
-  Black Speaker of the US House.
-- Cyclone Akvan: landfall due Friday on the Andhra coast, winds 100-110
-  km/h; extremely heavy rain likely today and tomorrow.
-- The North Korea missile-launch claim was NOT corroborated and is
-  deliberately left out, as in the 18 Nov poster.
+Renders a fixed 1024x1024 image with PIL only. No network, no clock,
+no randomness: the same run always produces the same bytes.
 """
-
-import os
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+HERE = Path(__file__).resolve().parent
+OUT = HERE / "entry.png"
+
 W, H = 1024, 1024
-MARGIN = 36
-CONTENT_W = W - 2 * MARGIN
+SIDE = 44
+CONTENT = W - 2 * SIDE
 
 PAPER = (250, 246, 238)
-INK = (26, 26, 26)
-MUTED = (90, 86, 78)
+INK = (18, 18, 18)
+GREY = (96, 96, 92)
+LIGHT_GREY = (178, 172, 164)
 RED = (163, 22, 33)
 NAVY = (31, 56, 100)
-RULE = (26, 26, 26)
-LIGHT_RULE = (180, 172, 158)
 
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-SERIF_BOLD = os.path.join(FONT_DIR, "DejaVuSerif-Bold.ttf")
-SANS = os.path.join(FONT_DIR, "DejaVuSans.ttf")
-SANS_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+FONTS = Path("/usr/share/fonts/truetype/dejavu")
+_cache = {}
 
 
-def font(path, size):
-    return ImageFont.truetype(path, size)
+def font(kind, size):
+    key = (kind, size)
+    if key not in _cache:
+        name = {
+            "serif_b": "DejaVuSerif-Bold.ttf",
+            "sans": "DejaVuSans.ttf",
+            "sans_b": "DejaVuSans-Bold.ttf",
+        }[kind]
+        _cache[key] = ImageFont.truetype(str(FONTS / name), size)
+    return _cache[key]
 
 
-def wrap(text, fnt, max_width):
-    """Greedy word wrap; returns a list of lines that fit max_width."""
+def wrap(draw, text, fnt, max_w):
+    """Greedy word wrap by measured pixel width."""
     lines = []
-    for paragraph in text.split("\n"):
-        words = paragraph.split()
-        if not words:
-            lines.append("")
-            continue
-        line = words[0]
-        for word in words[1:]:
-            trial = line + " " + word
-            if fnt.getlength(trial) <= max_width:
-                line = trial
-            else:
-                lines.append(line)
-                line = word
-        lines.append(line)
+    cur = ""
+    for word in text.split():
+        trial = word if not cur else cur + " " + word
+        if draw.textlength(trial, font=fnt) <= max_w or not cur:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
     return lines
 
 
-def draw_lines(draw, x, y, lines, fnt, fill, spacing):
-    """Draw lines top to bottom; return the y just below the last line."""
+def block(draw, lines, x, y, fnt, fill, leading):
+    """Draw stacked lines; return the y just below the block."""
     for line in lines:
         draw.text((x, y), line, font=fnt, fill=fill)
-        y += fnt.size + spacing
+        y += leading
     return y
 
 
-def rule(draw, x0, x1, y, fill=RULE, width=2):
-    draw.line([(x0, y), (x1, y)], fill=fill, width=width)
+def mixed_para(draw, tag, text, x, y, max_w, tag_fnt, body_fnt, leading):
+    """One paragraph: red bold tag, then black text, wrapped together.
 
-
-def kicker(draw, x, y, text, size=19):
-    fnt = font(SANS_BOLD, size)
-    draw.text((x, y), text, font=fnt, fill=RED)
-    return y + size + 6
-
-
-def story_card(draw, x, y, w, tag, headline, body, head_size=23, body_size=17):
-    """One grid card: red tag, bold headline, short body. Returns bottom y."""
-    y = kicker(draw, x, y, tag, size=17)
-    head_fnt = font(SANS_BOLD, head_size)
-    head_lines = wrap(headline, head_fnt, w)
-    y = draw_lines(draw, x, y, head_lines, head_fnt, INK, 2)
-    body_fnt = font(SANS, body_size)
-    body_lines = wrap(body, body_fnt, w)
-    y = draw_lines(draw, x, y + 2, body_lines, body_fnt, MUTED, 2)
+    Words carry their own font so the tag and body share lines cleanly.
+    Returns the y just below the paragraph.
+    """
+    words = [(tag, tag_fnt, RED)] + [(w, body_fnt, INK) for w in text.split()]
+    lines = []
+    cur = []
+    cur_w = 0.0
+    space_w = draw.textlength(" ", font=body_fnt)
+    for word, fnt, fill in words:
+        ww = draw.textlength(word, font=fnt)
+        add = ww if not cur else space_w + ww
+        if cur and cur_w + add > max_w:
+            lines.append(cur)
+            cur = [(word, fnt, fill)]
+            cur_w = ww
+        else:
+            cur.append((word, fnt, fill))
+            cur_w += add
+    if cur:
+        lines.append(cur)
+    for line_words in lines:
+        cx = x
+        for i, (word, fnt, fill) in enumerate(line_words):
+            if i:
+                cx += space_w
+            draw.text((cx, y), word, font=fnt, fill=fill)
+            cx += draw.textlength(word, font=fnt)
+        y += leading
     return y
 
 
-LEAD_HEADLINE = "Trump, Xi and Putin meet today in a first-ever trilateral"
-LEAD_DEK = "Nuclear arms top the agenda in Shenzhen \u2014 but no deal is expected"
-LEAD_BODY = (
-    "The three leaders have never met in this format. China confirmed the "
-    "summit on Monday; the White House and Kremlin had already agreed. "
-    "Officials caution against expecting a breakthrough, and Trump is not "
-    "expected to raise Ukraine in the three-way talks."
-)
-
-CARDS = [
-    (
-        "MIDDLE EAST",
-        "Iran fired on US sites in Kuwait; Bahrain hit a third time in a week",
-        "Tehran says it struck US drone and missile sites overnight, the "
-        "first attack on Kuwait since September. Vance vows no \u2018forever "
-        "war\u2019 \u2014 but gives no end date.",
-    ),
-    (
-        "THE HAGUE",
-        "World court rules today in Myanmar genocide case",
-        "The ICJ reads its judgment on Gambia\u2019s case over the 2017 "
-        "crackdown that drove 700,000 Rohingya into Bangladesh. A genocide "
-        "finding would be a first for a state.",
-    ),
-    (
-        "INDONESIA",
-        "Prabowo at APEC as Indonesia signs $71.8B in China deals",
-        "The president joins today\u2019s leaders\u2019 meeting after "
-        "witnessing deals on smart cities, appliances and coal-to-ethanol. "
-        "He meets Xi on Friday.",
-    ),
-    (
-        "GAMING",
-        "GTA VI rolls out worldwide after a 13-year wait",
-        "Rockstar\u2019s game unlocks at midnight local time, New Zealand "
-        "first, on PS5 and Xbox Series X|S. Preorders top $1.5B; no PC "
-        "version at launch.",
-    ),
-    (
-        "US POLITICS",
-        "Jeffries nominated 251\u201311, poised to be first Black Speaker",
-        "House Democrats backed their leader in a closed-door vote; the "
-        "floor vote is 3 January. Clark is set to be the first woman "
-        "majority leader.",
-    ),
-    (
-        "WEATHER",
-        "Cyclone Akvan bears down on India\u2019s east coast",
-        "Landfall due Friday on the Andhra coast, winds 100\u2013110 km/h; "
-        "extremely heavy rain is likely today and tomorrow. Seven "
-        "districts are on red alert.",
-    ),
-]
-
-BRIEFS = [
-    (
-        "PEW",
-        "Islam projected to pass Christianity as the largest faith by 2035.",
-    ),
-    (
-        "EUROPE",
-        "EU proposes a \u20ac45B Ukraine loan, repaid only after Russian reparations.",
-    ),
-    (
-        "SCIENCE",
-        "Voyager 1 believed to have reached one light-day from Earth.",
-    ),
-    (
-        "ESTONIA",
-        "Estonia to shut its road border crossings with Russia from 1 Dec.",
-    ),
-    (
-        "MARKETS",
-        "Nvidia halts H-chip shipments to China; Fed points to more hikes.",
-    ),
-    (
-        "YEMEN",
-        "Houthis near Aden as government forces pull back from Bab el-Mandeb.",
-    ),
-]
-
-
-def build():
+def main():
     img = Image.new("RGB", (W, H), PAPER)
-    draw = ImageDraw.Draw(img)
-    x0 = MARGIN
-    x1 = W - MARGIN
+    d = ImageDraw.Draw(img)
+    y = 28
 
     # ---- Masthead ----
-    y = 24
-    date_fnt = font(SANS_BOLD, 21)
-    date_text = "THURSDAY  \u00b7  19 NOVEMBER 2026"
-    tw = date_fnt.getlength(date_text)
-    draw.text(((W - tw) / 2, y), date_text, font=date_fnt, fill=RED)
-    y += 30
-    title_fnt = font(SERIF_BOLD, 58)
+    f_date = font("sans_b", 18)
+    date_line = "THURSDAY \u00b7 19 NOVEMBER 2026"
+    dw = d.textlength(date_line, font=f_date)
+    d.text(((W - dw) / 2, y), date_line, font=f_date, fill=RED)
+    y += 20 + 5
+
+    f_title = font("serif_b", 60)
     title = "THE WORLD TODAY"
-    tw = title_fnt.getlength(title)
-    draw.text(((W - tw) / 2, y), title, font=title_fnt, fill=NAVY)
-    y += 70
-    sub_fnt = font(SANS, 20)
+    tw = d.textlength(title, font=f_title)
+    d.text(((W - tw) / 2, y), title, font=f_title, fill=NAVY)
+    y += 70 + 3
+
+    f_sub = font("sans", 19)
     sub = "The day's world news in one image"
-    tw = sub_fnt.getlength(sub)
-    draw.text(((W - tw) / 2, y), sub, font=sub_fnt, fill=MUTED)
-    y += 32
-    rule(draw, x0, x1, y, width=3)
-    rule(draw, x0, x1, y + 6, fill=LIGHT_RULE, width=1)
+    sw = d.textlength(sub, font=f_sub)
+    d.text(((W - sw) / 2, y), sub, font=f_sub, fill=GREY)
+    y += 24 + 9
 
-    # ---- Lead story (height measured as drawn) ----
+    d.rectangle([SIDE, y, W - SIDE, y + 3], fill=INK)
+    y += 3 + 3
+    d.rectangle([SIDE, y, W - SIDE, y], fill=LIGHT_GREY)
+    y += 1 + 10
+
+    # ---- Lead story ----
+    f_kick = font("sans_b", 16)
+    d.text((SIDE, y), "SHENZHEN \u2014 LEAD STORY", font=f_kick, fill=RED)
+    y += 20 + 4
+
+    f_head = font("sans_b", 29)
+    head_lines = wrap(
+        d, "Trump, Xi and Putin meet today in a first-ever trilateral",
+        f_head, CONTENT)
+    assert len(head_lines) <= 2, f"lead headline needs {len(head_lines)} lines"
+    y = block(d, head_lines, SIDE, y, f_head, INK, 37)
+    y += 4
+
+    f_dek = font("serif_b", 22)
+    dek_lines = wrap(
+        d, "Nuclear arms top the agenda in Shenzhen \u2014 but no deal is expected",
+        f_dek, CONTENT)
+    assert len(dek_lines) <= 2, f"dek needs {len(dek_lines)} lines"
+    y = block(d, dek_lines, SIDE, y, f_dek, NAVY, 29)
+    y += 5
+
+    f_body = font("sans", 16)
+    body_lines = wrap(
+        d,
+        "The three leaders have never met in this format. China confirmed "
+        "the summit on Monday; the White House and Kremlin had already "
+        "agreed. Officials caution against expecting a breakthrough, and "
+        "Trump is not expected to raise Ukraine in the three-way talks.",
+        f_body, CONTENT)
+    assert len(body_lines) <= 3, f"lead body needs {len(body_lines)} lines"
+    y = block(d, body_lines, SIDE, y, f_body, GREY, 21)
     y += 16
-    y = kicker(draw, x0, y, "SHENZHEN  \u2014  LEAD STORY", size=19)
-    head_fnt = font(SANS_BOLD, 33)
-    head_lines = wrap(LEAD_HEADLINE, head_fnt, CONTENT_W)
-    y = draw_lines(draw, x0, y, head_lines, head_fnt, INK, 3)
-    dek_fnt = font(SERIF_BOLD, 22)
-    dek_lines = wrap(LEAD_DEK, dek_fnt, CONTENT_W)
-    y = draw_lines(draw, x0, y + 4, dek_lines, dek_fnt, NAVY, 2)
-    body_fnt = font(SANS, 19)
-    body_lines = wrap(LEAD_BODY, body_fnt, CONTENT_W)
-    y = draw_lines(draw, x0, y + 6, body_lines, body_fnt, MUTED, 3)
-    y += 8
-    rule(draw, x0, x1, y, fill=LIGHT_RULE, width=1)
 
-    # ---- Story grid: 2 columns x 3 rows, each row sized by its cards ----
-    col_w = (CONTENT_W - 28) // 2
-    row_y = y + 10
-    for row in range(3):
-        bottom = row_y
-        for col in range(2):
-            tag, headline, body = CARDS[row * 2 + col]
-            cx = x0 + col * (col_w + 28)
-            end = story_card(draw, cx, row_y, col_w, tag, headline, body)
-            bottom = max(bottom, end)
-        row_y = bottom + 8
-        if row < 2:
-            rule(draw, x0, x1, row_y - 4, fill=LIGHT_RULE, width=1)
-    y = row_y
-    rule(draw, x0, x1, y - 4, fill=LIGHT_RULE, width=1)
+    # ---- Story grid: 2 columns x 3 rows ----
+    cards = [
+        ("MIDDLE EAST",
+         "Iran fired on US sites in Kuwait; Bahrain hit a third time in a week",
+         "Tehran says it struck US drone and missile sites overnight, the "
+         "first attack on Kuwait since September. Vance vows no 'forever "
+         "war' \u2014 but gives no end date."),
+        ("THE HAGUE",
+         "World court rules today in Myanmar genocide case",
+         "The ICJ reads its judgment on Gambia's case over the 2017 "
+         "crackdown that drove 700,000 Rohingya into Bangladesh. A genocide "
+         "finding would be a first for a state."),
+        ("INDONESIA",
+         "Prabowo at APEC as Indonesia signs $71.8B in China deals",
+         "The president joins today's leaders' meeting after witnessing "
+         "deals on smart cities, appliances and coal-to-ethanol. He meets "
+         "Xi on Friday."),
+        ("GAMING",
+         "GTA VI rolls out worldwide after a 13-year wait",
+         "Rockstar's game unlocks at midnight local time, New Zealand "
+         "first, on PS5 and Xbox Series X|S. Preorders top $1.5B; no PC "
+         "version at launch."),
+        ("US POLITICS",
+         "Jeffries nominated 251\u201311, poised to be first Black Speaker",
+         "House Democrats backed their leader in a closed-door vote; the "
+         "floor vote is 3 January. Clark is set to be the first woman "
+         "majority leader."),
+        ("WEATHER",
+         "Cyclone Akvan bears down on India's east coast",
+         "Landfall due Friday on the Andhra coast, winds 100\u2013110 km/h; "
+         "extremely heavy rain is likely today and tomorrow. Seven "
+         "districts are on red alert."),
+    ]
+    gutter = 24
+    col_w = (CONTENT - gutter) // 2
+    f_tag = font("sans_b", 14)
+    f_chead = font("sans_b", 18)
+    f_cbody = font("sans", 15)
+    row_h = 132
+    for idx, (tag, headline, body) in enumerate(cards):
+        col = idx % 2
+        row = idx // 2
+        x = SIDE + col * (col_w + gutter)
+        cy = y + row * (row_h + 12)
+        d.text((x, cy), tag, font=f_tag, fill=RED)
+        cy += 18 + 3
+        h_lines = wrap(d, headline, f_chead, col_w)
+        assert len(h_lines) <= 2, f"card {idx + 1} headline needs {len(h_lines)} lines"
+        cy = block(d, h_lines, x, cy, f_chead, INK, 23)
+        cy += 3
+        b_lines = wrap(d, body, f_cbody, col_w)
+        assert len(b_lines) <= 3, f"card {idx + 1} body needs {len(b_lines)} lines"
+        cy = block(d, b_lines, x, cy, f_cbody, GREY, 19)
+        assert cy <= y + row * (row_h + 12) + row_h, f"card {idx + 1} overflows its row"
+    y += 3 * row_h + 2 * 12
 
     # ---- In brief: 2 columns x 3 rows ----
-    y += 4
-    brief_fnt = font(SANS_BOLD, 19)
-    draw.text((x0, y), "IN BRIEF", font=brief_fnt, fill=INK)
-    y += 28
-    brief_row_h = 40
-    for i, (tag, text) in enumerate(BRIEFS):
-        col = i % 2
-        row = i // 2
-        cx = x0 + col * (col_w + 28)
-        cy = y + row * brief_row_h
-        tag_fnt = font(SANS_BOLD, 16)
-        draw.text((cx, cy), tag + " \u2014 ", font=tag_fnt, fill=RED)
-        tag_w = tag_fnt.getlength(tag + " \u2014 ")
-        text_fnt = font(SANS, 17)
-        lines = wrap(text, text_fnt, col_w - tag_w)
-        ly = cy
-        for line in lines[:2]:
-            draw.text((cx + tag_w, ly), line, font=text_fnt, fill=INK)
-            ly += 20
-    y = y + 3 * brief_row_h + 2
-    rule(draw, x0, x1, y, width=2)
+    y += 10
+    f_brief_h = font("sans_b", 16)
+    d.text((SIDE, y), "IN BRIEF", font=f_brief_h, fill=INK)
+    y += 20 + 5
+    briefs = [
+        ("PEW", "Islam projected to pass Christianity as the largest faith by 2035."),
+        ("EUROPE", "EU proposes a \u20ac45B Ukraine loan, repaid only after Russian reparations."),
+        ("SCIENCE", "Voyager 1 believed to have reached one light-day from Earth."),
+        ("ESTONIA", "Estonia to shut its road border crossings with Russia from 1 Dec."),
+        ("MARKETS", "Nvidia halts H-chip shipments to China; Fed points to more hikes."),
+        ("YEMEN", "Houthis near Aden as government forces pull back from Bab el-Mandeb."),
+    ]
+    f_btag = font("sans_b", 15)
+    f_bbody = font("sans", 15)
+    brief_row_h = 42
+    for idx, (tag, text) in enumerate(briefs):
+        col = idx % 2
+        row = idx // 2
+        x = SIDE + col * (col_w + gutter)
+        by = y + row * (brief_row_h + 8)
+        end = mixed_para(d, tag + " \u2014", text, x, by, col_w,
+                         f_btag, f_bbody, 19)
+        assert end <= by + brief_row_h, f"brief {idx + 1} overflows its row"
+    y += 3 * brief_row_h + 2 * 8
 
     # ---- Footer ----
-    y += 8
-    foot_fnt = font(SANS, 17)
+    y += 14
+    d.rectangle([SIDE, y, W - SIDE, y], fill=LIGHT_GREY)
+    y += 1 + 7
+    f_foot = font("sans", 15)
     foot = "All events of Thursday, 19 November 2026"
-    tw = foot_fnt.getlength(foot)
-    draw.text(((W - tw) / 2, y), foot, font=foot_fnt, fill=MUTED)
-    y += 22
-    assert y <= H, "poster overflowed: bottom y=%d" % y
+    fw = d.textlength(foot, font=f_foot)
+    d.text(((W - fw) / 2, y), foot, font=f_foot, fill=GREY)
+    y += 19
 
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    img.save(out, format="PNG", optimize=True)
-    return out
+    assert y <= H, f"poster overflows: content ends at y={y}, height is {H}"
+    img.save(OUT, format="PNG")
+    print(f"{OUT} {OUT.stat().st_size} bytes")
 
 
 if __name__ == "__main__":
-    path = build()
-    size = os.path.getsize(path)
-    print("wrote", path, size, "bytes")
+    main()
